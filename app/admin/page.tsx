@@ -3,7 +3,7 @@
 import { useFirebase } from '../../firebase/client-provider';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { getFirestore, collection, addDoc, doc, setDoc, getDocs, getDoc, query, where, serverTimestamp, deleteDoc } from "firebase/firestore";
+import { getFirestore, collection, addDoc, doc, setDoc, getDocs, getDoc, query, where, serverTimestamp, deleteDoc, orderBy } from "firebase/firestore";
 import { useDebounce } from 'react-use';
 import { useToast } from "@/components/ui/use-toast";
 
@@ -11,7 +11,9 @@ interface Project {
   id: string;
   name: string;
   description: string;
-  htmlContent: string;
+  htmlContent: string | null;
+  isChunked?: boolean;
+  chunkCount?: number;
   createdAt?: { seconds: number; nanoseconds: number; };
   sandbox?: string;
   allow?: string;
@@ -116,6 +118,7 @@ export default function AdminPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [htmlContent, setHtmlContent] = useState('');
+  const [originalHtmlContent, setOriginalHtmlContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('code');
   const [isLoading, setIsLoading] = useState(true);
@@ -139,12 +142,12 @@ export default function AdminPage() {
   useDebounce(() => setDebouncedHtmlContent(htmlContent), 1500, [htmlContent]);
 
   useEffect(() => {
-    if (user === null) setIsLoading(true);
     if (user === undefined) {
-        setIsLoading(false);
-        router.push('/login');
-    } else if (user) {
-        setIsLoading(false);
+      setIsLoading(true);
+    } else if (user === null) {
+      router.push('/login');
+    } else {
+      setIsLoading(false);
     }
   }, [user, router]);
 
@@ -164,22 +167,45 @@ export default function AdminPage() {
   }, [isLoading, fetchProjects]);
 
   useEffect(() => {
-    if (!activeProject || debouncedHtmlContent === activeProject.htmlContent) return;
+    if (!activeProject || debouncedHtmlContent === originalHtmlContent) return;
+
     const saveProject = async () => {
-      setIsSaving(true);
-      const db = getFirestore(app);
-      const projectRef = doc(db, "projects", activeProject.id);
-      try {
-        await setDoc(projectRef, { htmlContent: debouncedHtmlContent }, { merge: true });
-        setActiveProject(prev => prev ? { ...prev, htmlContent: debouncedHtmlContent } : null);
-      } catch (error) {
-        console.error("Error auto-saving document: ", error);
-      } finally {
-        setTimeout(() => setIsSaving(false), 1000);
-      }
+        setIsSaving(true);
+        if (!app) return;
+        const db = getFirestore(app);
+        const projectRef = doc(db, "projects", activeProject.id);
+        const chunksCollectionRef = collection(db, "projects", activeProject.id, "htmlChunks");
+
+        try {
+            const chunkSize = 900 * 1024; // 900KB
+            const existingChunksSnapshot = await getDocs(chunksCollectionRef);
+            await Promise.all(existingChunksSnapshot.docs.map(chunkDoc => deleteDoc(chunkDoc.ref)));
+
+            const chunks = [];
+            for (let i = 0; i < debouncedHtmlContent.length; i += chunkSize) {
+                chunks.push(debouncedHtmlContent.substring(i, i + chunkSize));
+            }
+
+            await Promise.all(chunks.map((chunk, index) => {
+                return setDoc(doc(chunksCollectionRef, `chunk_${index}`), { content: chunk, order: index });
+            }));
+
+            await setDoc(projectRef, { htmlContent: null, isChunked: true, chunkCount: chunks.length }, { merge: true });
+
+            setActiveProject(prev => prev ? { ...prev, htmlContent: null, isChunked: true, chunkCount: chunks.length } : null);
+            
+            setOriginalHtmlContent(debouncedHtmlContent);
+
+        } catch (error) {
+            console.error("Error auto-saving document: ", error);
+            toast({ title: "Error Saving", description: "Could not save project changes.", variant: "destructive" });
+        } finally {
+            setTimeout(() => setIsSaving(false), 1000);
+        }
     };
+
     saveProject();
-  }, [debouncedHtmlContent, activeProject, app]);
+}, [debouncedHtmlContent, activeProject, app, originalHtmlContent, toast]);
 
   const openModal = () => {
     setModalStep(1);
@@ -211,29 +237,49 @@ export default function AdminPage() {
     reader.onload = async (e) => {
         const htmlContent = e.target?.result as string;
         const db = getFirestore(app);
-        const newProjectData = {
-          name: newProjectName,
-          description: newProjectDescription,
-          htmlContent,
-          createdAt: serverTimestamp(),
-          owner: user.uid,
-          sandbox: 'allow-scripts allow-same-origin',
-          allow: '',
-          legacy: [],
-        };
+        
+        const projectCollection = collection(db, "projects");
+        const projectRef = doc(projectCollection);
+        const newProjectId = projectRef.id;
+
         try {
-          const docRef = await addDoc(collection(db, "projects"), newProjectData);
-          const newDocSnap = await getDoc(docRef);
-          if (newDocSnap.exists()) {
-            const newProject = { id: newDocSnap.id, ...newDocSnap.data() } as Project;
-            setProjects(prevProjects => [newProject, ...prevProjects].sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0)));
-            handleSelectProject(newProject);
-            toast({ title: "Success!", description: `Project ${newProject.name} has been created.` });
-            closeModal();
-          } else {
-            toast({ title: "Error", description: "Could not find the new project after creation. Please refresh.", variant: "destructive" });
-            fetchProjects();
-          }
+            const chunkSize = 900 * 1024; // 900KB
+            const chunks = [];
+            for (let i = 0; i < htmlContent.length; i += chunkSize) {
+                chunks.push(htmlContent.substring(i, i + chunkSize));
+            }
+
+            const chunksCollectionRef = collection(db, "projects", newProjectId, "htmlChunks");
+            await Promise.all(chunks.map((chunk, index) => {
+                return setDoc(doc(chunksCollectionRef, `chunk_${index}`), { content: chunk, order: index });
+            }));
+            
+            const newProjectData = {
+                name: newProjectName,
+                description: newProjectDescription,
+                htmlContent: null,
+                isChunked: true,
+                chunkCount: chunks.length,
+                createdAt: serverTimestamp(),
+                owner: user.uid,
+                sandbox: 'allow-scripts allow-same-origin',
+                allow: '',
+                legacy: [],
+            };
+
+            await setDoc(projectRef, newProjectData);
+
+            const newDocSnap = await getDoc(projectRef);
+            if (newDocSnap.exists()) {
+                const newProject = { id: newDocSnap.id, ...newDocSnap.data() } as Project;
+                setProjects(prevProjects => [newProject, ...prevProjects].sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0)));
+                await handleSelectProject(newProject);
+                toast({ title: "Success!", description: `Project ${newProject.name} has been created.` });
+                closeModal();
+            } else {
+                toast({ title: "Error", description: "Could not find new project after creation. Please refresh.", variant: "destructive" });
+                fetchProjects();
+            }
         } catch (e: any) {
             toast({ title: "Error Creating Project", description: e.message, variant: "destructive" });
         }
@@ -241,9 +287,29 @@ export default function AdminPage() {
     reader.readAsText(newProjectFile);
   };
 
-  const handleSelectProject = (project: Project) => {
+  const handleSelectProject = async (project: Project) => {
     setActiveProject(project);
-    setHtmlContent(project.htmlContent);
+    setHtmlContent('');
+
+    let fullHtmlContent = '';
+    if (project.isChunked) {
+        setIsLoading(true);
+        if (app) {
+            const db = getFirestore(app);
+            const chunksCollectionRef = collection(db, "projects", project.id, "htmlChunks");
+            const q = query(chunksCollectionRef, orderBy("order"));
+            const querySnapshot = await getDocs(q);
+            const chunks = querySnapshot.docs.map(doc => doc.data().content);
+            fullHtmlContent = chunks.join('');
+        }
+        setIsLoading(false);
+    } else {
+      fullHtmlContent = project.htmlContent || '';
+    }
+
+    setHtmlContent(fullHtmlContent);
+    setOriginalHtmlContent(fullHtmlContent);
+
     setEditingName(project.name);
     setEditingDescription(project.description);
     setSandboxPermissions(project.sandbox ? project.sandbox.split(' ') : ['allow-scripts', 'allow-same-origin']);
