@@ -5,7 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { FirebaseClientProvider } from '../firebase/client-provider';
 
 export const metadata: Metadata = {
-  title: 'Sebastian.GauchoHearts.com',
+  title: 'Sebastian.gauchohearts.com',
   description: 'A personal portfolio and code playground for Sebastian.',
 };
 

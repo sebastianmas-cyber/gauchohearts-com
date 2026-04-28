@@ -3,8 +3,7 @@
 import { useFirebase } from '../../firebase/client-provider';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { getFirestore, collection, addDoc, doc, setDoc, getDocs, getDoc, query, where, serverTimestamp, deleteDoc, orderBy } from "firebase/firestore";
-import { useDebounce } from 'react-use';
+import { getFirestore, collection, doc, setDoc, getDocs, getDoc, query, where, serverTimestamp, deleteDoc, orderBy, writeBatch } from "firebase/firestore";
 import { useToast } from "@/components/ui/use-toast";
 
 interface Project {
@@ -18,7 +17,7 @@ interface Project {
   sandbox?: string;
   allow?: string;
   legacy?: string[];
-
+  visibility?: 'public' | 'unlisted';
 }
 
 const sandboxPermissionsList = [
@@ -118,9 +117,8 @@ export default function AdminPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [htmlContent, setHtmlContent] = useState('');
-  const [originalHtmlContent, setOriginalHtmlContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState('code');
+  const [activeTab, setActiveTab] = useState('preview');
   const [isLoading, setIsLoading] = useState(true);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -128,18 +126,18 @@ export default function AdminPage() {
   const [newProjectFile, setNewProjectFile] = useState<File | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [newProjectHtmlContent, setNewProjectHtmlContent] = useState<string | null>(null);
+  const [isFromCodeConverter, setIsFromCodeConverter] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [editingName, setEditingName] = useState('');
   const [editingDescription, setEditingDescription] = useState('');
+  const [editingVisibility, setEditingVisibility] = useState<'public' | 'unlisted'>('unlisted');
   const [sandboxPermissions, setSandboxPermissions] = useState<string[]>([]);
   const [allowPermissions, setAllowPermissions] = useState<string[]>([]);
   const [legacyPermissions, setLegacyPermissions] = useState<string[]>([]);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [showPermissions, setShowPermissions] = useState({ sandbox: true, policy: false, legacy: false });
-
-  const [debouncedHtmlContent, setDebouncedHtmlContent] = useState('');
-  useDebounce(() => setDebouncedHtmlContent(htmlContent), 1500, [htmlContent]);
 
   useEffect(() => {
     if (user === undefined) {
@@ -150,6 +148,76 @@ export default function AdminPage() {
       setIsLoading(false);
     }
   }, [user, router]);
+
+  useEffect(() => {
+    const projectCode = localStorage.getItem('projectCode');
+    if (projectCode) {
+      setNewProjectHtmlContent(projectCode);
+      setNewProjectName('New Project from Code');
+      setNewProjectDescription('Converted from code editor.');
+      setIsFromCodeConverter(true);
+      setIsModalOpen(true);
+      setModalStep(2);
+      localStorage.removeItem('projectCode');
+    }
+
+    const updatedProjectId = localStorage.getItem('updatedProjectId');
+    const updatedProjectCode = localStorage.getItem('updatedProjectCode');
+
+    if (updatedProjectId && updatedProjectCode && app && user) {
+        const updateProjectCode = async () => {
+            setIsSaving(true);
+            const db = getFirestore(app);
+            const projectRef = doc(db, "projects", updatedProjectId);
+            const chunksCollectionRef = collection(db, "projects", updatedProjectId, "htmlChunks");
+
+            try {
+                const batch = writeBatch(db);
+                const chunkSize = 900 * 1024;
+
+                const existingChunksSnapshot = await getDocs(chunksCollectionRef);
+                existingChunksSnapshot.docs.forEach(chunkDoc => {
+                    batch.delete(chunkDoc.ref);
+                });
+
+                const chunks = [];
+                for (let i = 0; i < updatedProjectCode.length; i += chunkSize) {
+                    chunks.push(updatedProjectCode.substring(i, i + chunkSize));
+                }
+
+                chunks.forEach((chunk, index) => {
+                    const chunkRef = doc(chunksCollectionRef, `chunk_${index}`);
+                    batch.set(chunkRef, { content: chunk, order: index });
+                });
+
+                batch.set(projectRef, { htmlContent: null, isChunked: true, chunkCount: chunks.length }, { merge: true });
+
+                await batch.commit();
+
+                toast({ title: "Success!", description: "Project code updated." });
+
+                localStorage.removeItem('updatedProjectId');
+                localStorage.removeItem('updatedProjectCode');
+
+                await fetchProjects();
+                const projDoc = await getDoc(projectRef);
+                if (projDoc.exists()) {
+                    const fetchedProject = { id: projDoc.id, ...projDoc.data() } as Project;
+                    await handleSelectProject(fetchedProject);
+                    setActiveTab('settings');
+                }
+
+            } catch (error) {
+                console.error("Error updating project code: ", error);
+                toast({ title: "Error Saving", description: "Could not save project code.", variant: "destructive" });
+            } finally {
+                setIsSaving(false);
+            }
+        };
+
+        updateProjectCode();
+    }
+  }, [app, user]);
 
   const fetchProjects = useCallback(async () => {
     if (isLoading || !user || !app) return;
@@ -166,52 +234,13 @@ export default function AdminPage() {
     if (!isLoading) fetchProjects();
   }, [isLoading, fetchProjects]);
 
-  useEffect(() => {
-    if (!activeProject || debouncedHtmlContent === originalHtmlContent) return;
-
-    const saveProject = async () => {
-        setIsSaving(true);
-        if (!app) return;
-        const db = getFirestore(app);
-        const projectRef = doc(db, "projects", activeProject.id);
-        const chunksCollectionRef = collection(db, "projects", activeProject.id, "htmlChunks");
-
-        try {
-            const chunkSize = 900 * 1024; // 900KB
-            const existingChunksSnapshot = await getDocs(chunksCollectionRef);
-            await Promise.all(existingChunksSnapshot.docs.map(chunkDoc => deleteDoc(chunkDoc.ref)));
-
-            const chunks = [];
-            for (let i = 0; i < debouncedHtmlContent.length; i += chunkSize) {
-                chunks.push(debouncedHtmlContent.substring(i, i + chunkSize));
-            }
-
-            await Promise.all(chunks.map((chunk, index) => {
-                return setDoc(doc(chunksCollectionRef, `chunk_${index}`), { content: chunk, order: index });
-            }));
-
-            await setDoc(projectRef, { htmlContent: null, isChunked: true, chunkCount: chunks.length }, { merge: true });
-
-            setActiveProject(prev => prev ? { ...prev, htmlContent: null, isChunked: true, chunkCount: chunks.length } : null);
-            
-            setOriginalHtmlContent(debouncedHtmlContent);
-
-        } catch (error) {
-            console.error("Error auto-saving document: ", error);
-            toast({ title: "Error Saving", description: "Could not save project changes.", variant: "destructive" });
-        } finally {
-            setTimeout(() => setIsSaving(false), 1000);
-        }
-    };
-
-    saveProject();
-}, [debouncedHtmlContent, activeProject, app, originalHtmlContent, toast]);
-
   const openModal = () => {
     setModalStep(1);
     setNewProjectFile(null);
     setNewProjectName('');
     setNewProjectDescription('');
+    setNewProjectHtmlContent(null);
+    setIsFromCodeConverter(false);
     setIsModalOpen(true);
   };
 
@@ -228,14 +257,12 @@ export default function AdminPage() {
   };
 
   const handleCreateProject = async () => {
-    if (!app || !user || !newProjectFile || !newProjectName) {
-        toast({ title: "Error", description: "Project name and file are required.", variant: "destructive" });
+    if (!app || !user || (!newProjectFile && !newProjectHtmlContent) || !newProjectName) {
+        toast({ title: "Error", description: "Project name and content are required.", variant: "destructive" });
         return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        const htmlContent = e.target?.result as string;
+    const processHtmlContent = async (htmlContent: string) => {
         const db = getFirestore(app);
         
         const projectCollection = collection(db, "projects");
@@ -243,31 +270,42 @@ export default function AdminPage() {
         const newProjectId = projectRef.id;
 
         try {
-            const chunkSize = 900 * 1024; // 900KB
+            const batch = writeBatch(db);
+
+            const newProjectData = {
+                name: newProjectName,
+                description: newProjectDescription,
+                htmlContent: '', 
+                isChunked: false,
+                chunkCount: 0,
+                createdAt: serverTimestamp(),
+                owner: user.uid,
+                sandbox: 'allow-scripts allow-same-origin',
+                allow: '',
+                legacy: [],
+                visibility: 'unlisted' as 'public' | 'unlisted',
+            };
+            batch.set(projectRef, newProjectData);
+
+            const chunkSize = 900 * 1024; 
             const chunks = [];
             for (let i = 0; i < htmlContent.length; i += chunkSize) {
                 chunks.push(htmlContent.substring(i, i + chunkSize));
             }
 
             const chunksCollectionRef = collection(db, "projects", newProjectId, "htmlChunks");
-            await Promise.all(chunks.map((chunk, index) => {
-                return setDoc(doc(chunksCollectionRef, `chunk_${index}`), { content: chunk, order: index });
-            }));
+            chunks.forEach((chunk, index) => {
+                const chunkRef = doc(chunksCollectionRef, `chunk_${index}`);
+                batch.set(chunkRef, { content: chunk, order: index });
+            });
             
-            const newProjectData = {
-                name: newProjectName,
-                description: newProjectDescription,
-                htmlContent: null,
-                isChunked: true,
-                chunkCount: chunks.length,
-                createdAt: serverTimestamp(),
-                owner: user.uid,
-                sandbox: 'allow-scripts allow-same-origin',
-                allow: '',
-                legacy: [],
-            };
+            batch.set(projectRef, {
+              isChunked: true,
+              chunkCount: chunks.length,
+              htmlContent: null
+            }, { merge: true });
 
-            await setDoc(projectRef, newProjectData);
+            await batch.commit();
 
             const newDocSnap = await getDoc(projectRef);
             if (newDocSnap.exists()) {
@@ -284,7 +322,17 @@ export default function AdminPage() {
             toast({ title: "Error Creating Project", description: e.message, variant: "destructive" });
         }
     };
-    reader.readAsText(newProjectFile);
+
+    if (newProjectHtmlContent) {
+        await processHtmlContent(newProjectHtmlContent);
+    } else if (newProjectFile) {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const htmlContent = e.target?.result as string;
+            await processHtmlContent(htmlContent);
+        };
+        reader.readAsText(newProjectFile);
+    }
   };
 
   const handleSelectProject = async (project: Project) => {
@@ -308,25 +356,22 @@ export default function AdminPage() {
     }
 
     setHtmlContent(fullHtmlContent);
-    setOriginalHtmlContent(fullHtmlContent);
-
     setEditingName(project.name);
     setEditingDescription(project.description);
+    setEditingVisibility(project.visibility || 'unlisted');
     setSandboxPermissions(project.sandbox ? project.sandbox.split(' ') : ['allow-scripts', 'allow-same-origin']);
     setAllowPermissions(project.allow ? project.allow.split(' ') : []);
     setLegacyPermissions(project.legacy || []);
-    setActiveTab('code');
-  };
-  
-  const handleEditorFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => setHtmlContent(e.target?.result as string);
-      reader.readAsText(file);
-    }
+    setActiveTab('preview');
   };
 
+  const handleEditInCodeEditor = () => {
+    if (!activeProject) return;
+    localStorage.setItem('editingProjectId', activeProject.id);
+    localStorage.setItem('editingProjectCode', htmlContent);
+    router.push('/admin/code');
+  };
+  
   const handlePermissionChange = (type: 'sandbox' | 'allow' | 'legacy', permission: string, checked: boolean) => {
     const setter = { sandbox: setSandboxPermissions, allow: setAllowPermissions, legacy: setLegacyPermissions }[type];
     const all = { sandbox: sandboxPermissionsList, allow: permissionsPolicyList, legacy: legacyPermissionsList }[type];
@@ -352,7 +397,8 @@ export default function AdminPage() {
     try {
       const updatedDetails = { 
           name: editingName, 
-          description: editingDescription, 
+          description: editingDescription,
+          visibility: editingVisibility,
           sandbox: sandboxPermissions.join(' '),
           allow: allowPermissions.join(' '),
           legacy: legacyPermissions,
@@ -457,7 +503,7 @@ export default function AdminPage() {
                   <textarea id="projectDescription" value={newProjectDescription} onChange={(e) => setNewProjectDescription(e.target.value)} placeholder="A brief description of what this project is about." className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" rows={3}></textarea>
                 </div>
                 <div className="flex justify-between items-center">
-                  <button onClick={() => setModalStep(1)} className="text-sm text-gray-500 hover:underline">Back</button>
+                  {!isFromCodeConverter && <button onClick={() => setModalStep(1)} className="text-sm text-gray-500 hover:underline">Back</button>}
                   <div>
                     <button onClick={closeModal} className="text-sm text-gray-500 hover:underline mr-4">Cancel</button>
                     <button onClick={handleCreateProject} className="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded cursor-pointer" disabled={!newProjectName}>Create Project</button>
@@ -514,29 +560,14 @@ export default function AdminPage() {
           ) : (
             <div className="flex flex-col h-full">
               <div className="flex border-b bg-white">
-                  <button onClick={() => setActiveTab('code')} className={`py-3 px-6 font-semibold ${activeTab === 'code' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'}`}>Code</button>
                   <button onClick={() => setActiveTab('preview')} className={`py-3 px-6 font-semibold ${activeTab === 'preview' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'}`}>Preview</button>
                   <button onClick={() => setActiveTab('settings')} className={`py-3 px-6 font-semibold ${activeTab === 'settings' ? 'border-b-2 border-blue-500 text-blue-600' : 'text-gray-600'}`}>Settings</button>
               </div>
               <div className="flex-grow overflow-y-auto">
-                <div className="p-4">
-                    {activeTab === 'code' && (
-                    <div className="flex flex-col h-[calc(100vh-10rem)]">
-                        <div className="flex justify-between items-center mb-2">
-                        <h2 className="text-xl font-semibold truncate">Editing: {activeProject.name || activeProject.id}</h2>
-                        <input type="file" accept=".html,.txt" onChange={handleEditorFileUpload} className="text-sm"/>
-                        </div>
-                        <textarea
-                        className="w-full flex-grow p-3 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm bg-gray-50"
-                        value={htmlContent}
-                        onChange={(e) => setHtmlContent(e.target.value)}
-                        />
-                        <div className="text-right text-sm text-gray-500 h-4 mt-1">{isSaving ? 'Saving...' : 'Changes saved automatically'}</div>
-                    </div>
-                    )}
+                <div className="p-4 h-full">
                     {activeTab === 'preview' && (
                     <iframe
-                        className="w-full h-[calc(100vh-5rem)] border rounded-md bg-white"
+                        className="w-full h-full border rounded-md bg-white"
                         srcDoc={htmlContent}
                         sandbox={sandboxPermissions.join(' ')}
                         allow={allowPermissions.join(' ')}
@@ -546,7 +577,15 @@ export default function AdminPage() {
                     )}
                     {activeTab === 'settings' && (
                     <div>
-                        <h3 className="text-lg font-bold mb-4">Settings</h3>
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-2xl font-bold">Settings</h3>
+                            <button 
+                                onClick={handleEditInCodeEditor}
+                                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:shadow-lg transition-all duration-150 ease-in-out"
+                            >
+                                Edit in Code Editor
+                            </button>
+                        </div>
                         <div className="mb-6">
                             <label htmlFor="projectLink" className="block text-gray-700 text-sm font-bold mb-2">Project Link</label>
                             <div className="flex items-center space-x-2">
@@ -576,9 +615,22 @@ export default function AdminPage() {
                         <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="editingProjectName">Project Name</label>
                         <input type="text" id="editingProjectName" value={editingName} onChange={(e) => setEditingName(e.target.value)} className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"/>
                         </div>
-                        <div className="mb-6">
+                        <div className="mb-4">
                         <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="editingProjectDescription">Description</label>
                         <textarea id="editingProjectDescription" value={editingDescription} onChange={(e) => setEditingDescription(e.target.value)} className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" rows={3}></textarea>
+                        </div>
+                        <div className="mb-6">
+                            <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="editingVisibility">Visibility</label>
+                            <select 
+                                id="editingVisibility" 
+                                value={editingVisibility} 
+                                onChange={(e) => setEditingVisibility(e.target.value as 'public' | 'unlisted')} 
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                            >
+                                <option value="unlisted">Unlisted</option>
+                                <option value="public">Public</option>
+                            </select>
+                            <p className="text-xs text-gray-600 mt-1">'Public' projects are listed on the /all page. 'Unlisted' projects are only accessible via direct link.</p>
                         </div>
 
                         <div className="mt-8">
@@ -678,7 +730,7 @@ export default function AdminPage() {
                             </div>
                         </div>
 
-                        <button onClick={handleUpdateProjectDetails} className="mt-6 bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" disabled={isSaving || (editingName === activeProject.name && editingDescription === activeProject.description && sandboxPermissions.join(' ') === (activeProject.sandbox || '') && allowPermissions.join(' ') === (activeProject.allow || '') && legacyPermissions.join(' ') === (activeProject.legacy?.join(' ') || ''))}>
+                        <button onClick={handleUpdateProjectDetails} className="mt-6 bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" disabled={isSaving || (editingName === activeProject.name && editingDescription === activeProject.description && editingVisibility === (activeProject.visibility || 'unlisted') && sandboxPermissions.join(' ') === (activeProject.sandbox || '') && allowPermissions.join(' ') === (activeProject.allow || '') && legacyPermissions.join(' ') === (activeProject.legacy?.join(' ') || ''))}>
                         {isSaving ? 'Saving...' : 'Save Changes'}
                         </button>
                         

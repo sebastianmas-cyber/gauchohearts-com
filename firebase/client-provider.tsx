@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState, ReactNode } from 'react
 import { onAuthStateChanged, User, getAuth } from 'firebase/auth';
 import { app } from './client'; // Import the initialized app
 import { FirebaseApp } from 'firebase/app';
+import { useRouter, usePathname } from 'next/navigation';
 
 // Define the shape of the context value
 interface FirebaseContextValue {
@@ -18,14 +19,19 @@ export const FirebaseContext = createContext<FirebaseContextValue | null>(null);
 export function FirebaseClientProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const auth = getAuth(app);
+  const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user);
+      if (user && pathname === '/login') {
+        router.push('/admin');
+      }
     });
     // Cleanup subscription on unmount
     return () => unsubscribe();
-  }, [auth]);
+  }, [auth, pathname, router]);
 
   return (
     <FirebaseContext.Provider value={{ app, user }}>

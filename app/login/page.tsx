@@ -1,27 +1,16 @@
 'use client';
 
-import { useState, useEffect, FormEvent } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, FormEvent } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '@/firebase/client';
 import { useToast } from '@/components/ui/use-toast';
-import { useFirebase } from '@/firebase/client-provider';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const { toast } = useToast();
-  const router = useRouter();
-  const { user } = useFirebase();
-
-  useEffect(() => {
-    // If the user is already logged in, redirect to the admin page.
-    if (user) {
-      router.push('/admin');
-    }
-  }, [user, router]);
 
   const handleSignIn = async (e: FormEvent) => {
     e.preventDefault();
@@ -31,8 +20,6 @@ export default function LoginPage() {
         title: "Success",
         description: "Logged in successfully! Redirecting...",
       });
-      // On successful sign-in, redirect to the admin page.
-      router.push('/admin');
     } catch (error: any) {
       console.error(error);
       toast({
@@ -42,11 +29,6 @@ export default function LoginPage() {
       });
     }
   };
-
-  // Render nothing or a loading spinner while redirecting
-  if (user) {
-    return null;
-  }
 
   return (
     <div className="flex items-center justify-center h-screen bg-gray-100">

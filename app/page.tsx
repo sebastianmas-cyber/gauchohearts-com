@@ -12,6 +12,11 @@ export default function Home() {
           <span className="text-blue-500 text-5xl">Sebastian</span>.gauchohearts.com
         </h1>
         <p className="text-lg mb-8">View projects from direct links</p>
+        <Link href="/all">
+          <button className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+            View All Projects
+          </button>
+        </Link>
       </div>
     </main>
   );
