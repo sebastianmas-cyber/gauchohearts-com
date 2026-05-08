@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { useRouter } from 'next/navigation';
 
@@ -9,6 +9,7 @@ export default function CodePage() {
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('code');
   const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const projectId = localStorage.getItem('editingProjectId');
@@ -46,6 +47,18 @@ export default function CodePage() {
     }
   };
 
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setCode(content);
+      };
+      reader.readAsText(file);
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen p-4">
       <div className="flex justify-between items-center mb-4">
@@ -64,6 +77,13 @@ export default function CodePage() {
             </button>
         </div>
         <div>
+            <input type="file" accept=".html" onChange={handleFileUpload} className="hidden" ref={fileInputRef} />
+            <button
+              className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded mr-2"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Upload Code
+            </button>
             <button
             className="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded mr-2"
             onClick={handleSave}
