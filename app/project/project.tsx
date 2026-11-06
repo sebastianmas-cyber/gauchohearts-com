@@ -42,14 +42,6 @@ const storageApiScript = `
   })();
 `;
 
-const fullSandboxPermissions = [
-    'allow-downloads', 'allow-forms', 'allow-modals', 'allow-orientation-lock',
-    'allow-pointer-lock', 'allow-popups', 'allow-popups-to-escape-sandbox',
-    'allow-presentation', 'allow-same-origin', 'allow-scripts',
-    'allow-storage-access-by-user-activation', 'allow-top-navigation',
-    'allow-top-navigation-by-user-activation', 'allow-top-navigation-to-custom-protocols',
-].join(' ');
-
 export default function Project() {
   const { app } = useFirebase();
   const searchParams = useSearchParams();
@@ -57,6 +49,7 @@ export default function Project() {
   const [project, setProject] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [iframeSrcDoc, setIframeSrcDoc] = useState('');
+  const [sandboxPermissions, setSandboxPermissions] = useState('');
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const storage = useProjectStorage(id ?? '');
@@ -77,6 +70,21 @@ export default function Project() {
           setProject(projectData);
           const fullHtml = `<script>${storageApiScript}</script>${projectData.htmlContent}`;
           setIframeSrcDoc(fullHtml);
+
+          const permissions = new Set<string>();
+          if (projectData.sandbox) {
+              projectData.sandbox.split(' ').forEach((p: string) => permissions.add(p));
+          }
+          if (projectData.allow) { 
+              projectData.allow.split(' ').forEach((p: string) => permissions.add(p));
+          }
+          if (projectData.legacy && Array.isArray(projectData.legacy)) {
+              projectData.legacy.forEach((p: string) => permissions.add(p));
+          }
+          permissions.add('allow-scripts');
+          permissions.add('allow-same-origin');
+          setSandboxPermissions(Array.from(permissions).join(' '));
+
         } else {
           setProject(null);
           setIframeSrcDoc('');
@@ -134,7 +142,9 @@ export default function Project() {
         error = e.message;
       }
 
-      iframeRef.current?.contentWindow.postMessage({ type: 'response', requestId, data: response, error }, '*');
+      if (iframeRef.current && iframeRef.current.contentWindow) {
+        iframeRef.current.contentWindow.postMessage({ type: 'response', requestId, data: response, error }, '*');
+      }
     };
 
     window.addEventListener('message', handleMessage);
@@ -157,7 +167,7 @@ export default function Project() {
       ref={iframeRef}
       className="h-full w-full"
       srcDoc={iframeSrcDoc}
-      sandbox={fullSandboxPermissions}
+      sandbox={sandboxPermissions}
       scrolling="no"
     />
   );

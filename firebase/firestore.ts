@@ -8,6 +8,9 @@ interface Project {
   htmlContent: string | null;
   isChunked?: boolean;
   chunkCount?: number;
+  sandbox?: string;
+  allow?: string;
+  legacy?: string[];
   [key: string]: any;
 }
 
